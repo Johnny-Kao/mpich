@@ -1,0 +1,64 @@
+name: PMI2 diagnostics staging
+
+on:
+  push:
+    branches:
+      - staging/pmi2-review-diagnostics
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pmi2-staging:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify staging changes
+        run: |
+          git diff --check HEAD~3 HEAD
+          test -f test/mpi/impls/pmi/test_pmi2_nodeattr.c
+          test -f test/mpi/impls/pmi/test_pmi2_nodeattr_fault.c
+      - name: Prepare toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config gfortran python3 libhwloc-dev libnuma-dev
+          for name in test_pmi2_nodeattr test_pmi2_nodeattr_fault; do
+            gcc -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc/pmi/include -fsyntax-only "test/mpi/impls/pmi/${name}.c"
+          done
+      - name: Build MPICH and PMI2 regression tests
+        run: |
+          ./autogen.sh > autogen.log 2>&1 || { tail -n 80 autogen.log; exit 1; }
+          ./configure --prefix="$RUNNER_TEMP/mpich" --with-pm=hydra --with-device=ch4:ofi --with-libfabric=embedded --with-yaksa=embedded --with-mpl=embedded --with-hwloc=embedded --disable-fortran --disable-cxx --disable-doc --disable-dependency-tracking > configure.log 2>&1 || { tail -n 80 configure.log; exit 1; }
+          make -j 2 > build.log 2>&1 || { tail -n 80 build.log; exit 1; }
+          make install > install.log 2>&1 || { tail -n 80 install.log; exit 1; }
+          for name in test_pmi2_nodeattr test_pmi2_nodeattr_fault; do
+            ./libtool --mode=link gcc -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Isrc/pmi/include "test/mpi/impls/pmi/${name}.c" src/pmi/libpmi.la src/mpl/libmpl.la -ldl -lm -o "${name}"
+          done
+      - name: Run PMI2 diagnostics regressions
+        run: |
+          export PATH="$RUNNER_TEMP/mpich/bin:$PATH"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/mpich/lib:${LD_LIBRARY_PATH:-}"
+          timeout -k 3s 40s mpiexec -n 4 ./test_pmi2_nodeattr > normal.log 2>&1
+          grep -q 'No Errors' normal.log || { cat normal.log; exit 1; }
+          set +e
+          timeout -k 3s 40s mpiexec -disable-auto-cleanup -n 3 ./test_pmi2_nodeattr_fault > fault.log 2>&1
+          rc=$?
+          set -e
+          cat fault.log
+          test "$rc" -ne 124
+          test "$rc" -ne 137
+          grep -q 'No Errors' fault.log
+          ! grep -q 'Bad file descriptor' fault.log
+          echo STAGING_PMI2=PASS
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmi2-staging-logs
+          path: |
+            *.log
+          retention-days: 7
