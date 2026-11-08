@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 /*
  * Copyright (C) by Argonne National Laboratory
  *     See COPYRIGHT in top-level directory
@@ -9,8 +8,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include "pmi2.h"
+
+int kill(pid_t pid, int sig);
 
 #define CHECK_PMI2(call, exit_code) do { \
     int check_rc = (call); \
